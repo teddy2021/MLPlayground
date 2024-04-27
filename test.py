@@ -3,7 +3,10 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 torch.autograd.set_detect_anomaly(True)
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cpu'#'cuda' if torch.cuda.is_available() else 'cpu'
+from tokenizers import Tokenizer
+from tokenizers import decoders
+import matplotlib.pyplot as plt
 
 class Block(nn.Module):
 	def __init__(self, embeddings, headcount, context_size):
@@ -30,14 +33,16 @@ class MultiHeadAttention(nn.Module):
 
 	def forward(self,x):
 		out = torch.cat([h(x) for h in self.heads], dim=-1)
-		return self.dropout(self.proj(out))
+		out = self.proj(out)
+		out = self.dropout(out)
+		return out
 
 class Head(nn.Module):
 	def __init__(self, dims, head_sz, size, d_chance):
 		super().__init__()
-		self.key = nn.Linear(dims, head_size, bias=False)
-		self.query = nn.Linear(dims, head_size, bias=False)
-		self.value = nn.Linear(dims, head_size, bias=False)
+		self.key = nn.Linear(dims, head_sz, bias=False)
+		self.query = nn.Linear(dims, head_sz, bias=False)
+		self.value = nn.Linear(dims, head_sz, bias=False)
 		self.register_buffer('tril', torch.tril(torch.ones(size, size)))
 		self.dropout = nn.Dropout(d_chance)
 
@@ -69,7 +74,7 @@ class FeedForward(nn.Module):
 		return self.net(x)
 
 class Model(nn.Module):
-	def __init__(self, context_size, batche_count, vocabulary_size, embed_dims, headcount):
+	def __init__(self, context_size, batche_count, vocabulary_size, embed_dims, headcount, block_count):
 		super().__init__()
 		self.context_size = context_size
 		self.batch_count = batche_count
@@ -78,12 +83,15 @@ class Model(nn.Module):
 		self.token_embedding_table = nn.Embedding(vocabulary_size, embed_dims)
 		self.position_embedding_table = nn.Embedding(context_size, embed_dims)
 
-		self.blocks = nn.Sequential(
-			Block(embed_dims, headcount, context_size),
-			Block(embed_dims, headcount, context_size),
-			Block(embed_dims, headcount, context_size),
-			nn.LayerNorm(embed_dims)
+		self.blocks = nn.Sequential(*[
+			Block(
+				embed_dims, 
+				headcount, 
+				context_size) 
+			for _ in range(block_count)
+			]
 		)
+		self.layer_norm = nn.LayerNorm(embed_dims)
 		self.lm_head = nn.Linear(embed_dims, vocabulary_size)
 
 	def get_batch(self, data):
@@ -99,6 +107,7 @@ class Model(nn.Module):
 		pos_emb = self.position_embedding_table(torch.arange(wi, device=device))
 		tok_pos = token_embed + pos_emb
 		tok_pos = self.blocks(tok_pos)
+		tok_pos = self.layer_norm(tok_pos)
 		logits = self.lm_head(tok_pos)
 
 		if None == targets:
@@ -134,51 +143,65 @@ class Model(nn.Module):
 		self.train()
 		return out
 
+
 if __name__ == '__main__':
-	print('Beginning...\n\n')
+	print('Beginning...')
 	print('Running on',device)
-	with open('input.txt', 'r', encoding='utf-8') as f:
+	token = Tokenizer.from_file('Plato-BPE.json')
+	token.decoder = decoders.BPEDecoder()
+	with open('Plato Complete Works_djvu.txt', 'r', encoding='utf-8') as f:
 		text = f.read()
 	print(f'Read text [{len(text)}]')
 	
-	words = sorted(list(set(text)))
-	sz = int(0.9*len(text))
-	stoi = {wrd:i for i,wrd in enumerate(words)}
-	itos = {i:wrd for i,wrd in enumerate(words)}
-
-	wtov = lambda w: [stoi[wrd] for wrd in w]
-	vtow = lambda v: ''.join([itos[vec] for vec in v])
-	
-	data = torch.tensor(wtov(text), dtype=torch.long)
+	print("encoding data")
+	ids = list(set([token.encode(wrd).ids[0] for wrd in text.split()]))
+	data = torch.tensor([token.encode(wrd).ids[0] for wrd in text.split()], dtype=torch.long)
+	sz = int(len(data) * 0.9)
 	training = data[:sz]
 	validation = data[sz:]
 
-	batch_count = 4
-	size = 128 #context
-	head_size = 4
-	dims = 16
-	iters = 50
-	learn = 3e-4
 
+	batch_count = 100
+	size = 256 #context
+	head_count = 8
+	dims = 384
+	iters = 5000
+	learn = 3e-4
+	block_count = 8
+	loss_interval = iters // 20
+	x = []
+	y = []
 	print('Setup variables and lambdas.')
 
-	m = Model(size, batch_count, len(training), dims, head_size)
-	m = m.to(device)	
+
+	m = Model(size, batch_count, token.get_vocab_size(), dims, head_count, block_count)
+	m = m.to(device)
+
 
 	optimizer = torch.optim.AdamW(m.parameters(), lr=learn)
 
-	print('Setup model')
-	print('\n\n')
+
+	print(f'Setup model and optimization {sum(p.numel() for p in m.parameters())/1e6} M parameters')
 	for steps in range(iters):
-		print(f'{100*steps/iters}%')
+		print(f'Training...\t{100*steps/iters}% \tGetting batch',end='\r')
+		if(steps % loss_interval == 0):
+			x.append(steps//loss_interval)
+			y.append(m.estimate_loss(100, training))
 		batch_in, batch_out = m.get_batch(training)
+		print(f'Training...\t{100*steps/iters}% \tForwarding through batch',end='\r')
 		_, loss = m(batch_in, batch_out)
 
+		print(f'Training...\t{100*steps/iters}% \tOptimizing',' ' * 32, end='\r')
 		optimizer.zero_grad(set_to_none=True)
 		loss.backward()
 		optimizer.step()
 
-	print("finished training.")
+	print(f'Training...\t 100%',' ' *32)
 	con = torch.zeros((1,1), dtype=torch.long, device=device)
-	pred = m.predict(con, maximal_tokens=500)[0].tolist()
-	print(f'\n\nWith a loss of {m.estimate_loss(iters//10, training)} we have {vtow(pred)}')
+	pred = m.predict(con, maximal_tokens=500)
+	pred = pred[0].tolist()
+	print(f'\n\nWith a loss of {m.estimate_loss(300, validation)} we have {token.decode(pred)}')
+	m.save(model.state_dict(), 'model.ml')
+	fig, ax = plt.subplots()
+	ax.plot(x, y)
+	fig.show()
