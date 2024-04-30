@@ -7,20 +7,17 @@ device = 'cpu'#'cuda' if torch.cuda.is_available() else 'cpu'
 torch.autograd.set_detect_anomaly(True)
 import matplotlib.pyplot as plt
 
-words = []
-toid = {}
-tostr = {}
-def encode(wordset):
+def encode(wordset, mapping):
 	out = []
 	for word in wordset:
-		encoding = toid[word]
+		encoding = mapping[word]
 		out.append(encoding)
 	return out
 
-def decode(encoding):
+def decode(encoding, mapping):
 	out = []
 	for num in encoding:
-		word = tostr[num]
+		word = mapping[num]
 		out.append(word)
 	return out
 
@@ -180,7 +177,7 @@ if __name__ == '__main__':
 	toid = {wrd:i for i, wrd in enumerate(words)}
 	tostr = {i:wrd for i, wrd in enumerate(words)}
 	
-	data = torch.tensor(encode(raw), dtype=torch.long)
+	data = torch.tensor(encode(raw, toid), dtype=torch.long)
 	length = len(data)
 	print(f'{length} data points in total')
 	training = data[:int(length * 0.9) ]
@@ -229,7 +226,7 @@ if __name__ == '__main__':
 	print(f'Training...\t 100%',' ' *32)
 	con = torch.zeros((1,1), dtype=torch.long, device=device)
 	pred = m.predict(con, maximal_tokens=500)[0].tolist()
-	print(f'\n\nWith a loss of {m.estimate_loss(300, validation)} we have {" ".join(decode(pred))}')
+	print(f'\n\nWith a loss of {m.estimate_loss(300, validation)} we have {" ".join(decode(pred, tostr))}')
 	fig, ax = plt.subplots()
 	ax.plot(x, y)
 	fig.show()
