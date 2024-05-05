@@ -11,48 +11,36 @@ class DPO:
 		self.frozen = model # the frozen model for evaluation 
 		self.active = model # the model to be tuned
 
-	def get_loss(self, given):
-		frozen_acc, frozen_rej = self.frozen(given)
-		active_acc, active_rej = self.active(given)
+	def DPO_loss_batch(self, accepted, rejected):
 
-		frozen_acc = F.log_softmax(frozen_acc,1)
-		frozen_rej = F.log_softmax(frozen_rej,1)
-		active_acc = F.log_softmax(active_acc,1)
-		active_rej = F.log_softmax(active_rej,1)
+		active_acc, frozen_acc = accepted
+		active_rej, frozen_rej = rejected
 
-		frozen_ratio = frozen_acc - frozen_rej
-		active_ratio = active_acc - active_rej
+		rewards_acc = self.beta * (active_acc - frozen_acc).detatch()
+		rewards_rej = self.beta * (active_rej - frozen_rej).detatch()
+
+		accepted_ratio = active_acc - frozen_acc
+		rejected_ratio = active_rej - active_rej
+
+		losses = F.logsigmoid(self.beta * accepted_ratio) - F.logsigmoid(self.beta * rejected_ratio)
 
 
+		return losses, rewards_acc, rewards_rej
 
+	def get_loss(self, batch):
+
+		acc_logits, act_acc, act_rej = self.active(batch)[0], self.active.get_distribution(batch)
+		fro_logits, fro_acc, fro_rej = self.frozen(batch), self.frozen.get_distribution(batch)
+		accepted = (act_acc, fro_acc)
+		rejected = (act_rej, fro_rej)
+		loss, rewards_acc, rewards_rej = self.DPO_loss_batch(accepted, rejected)
+
+		mean_loss = loss.mean()
+		mean_accepted = rewards_acc.mean()
+		mean_rejected = rewards_rej.mean()
+
+		return mean_loss, mean_accepted, mean_rejected
 
 if __name__ == "__main__":
-#	ds = load_dataset("garage-bAInd/Open-Platypus", split='train')
-#	print(ds.features)
-#	ds.set_format(type='torch', columns=['input','output', 'instruction','data_source'])
-#	ds = ds.remove_columns(column_names=['input', 'data_source'])
-#	prompts = ds["instruction"]
-#	prompt_tokens = list(map(lambda x: re.split(r"([^\w\t\n\r\f\v])", x), prompts))
-#	print(prompt_tokens[0])
-#	responses = ds['output']
-#	response_tokens = list(map(lambda x: re.split(r"([^\w\t\n\r\f\v])", x), responses))
-#	sentences = prompts + responses
-#	tokens = []
-#
-#	for x in sentences:
-#		val = re.split(r"([^\w\t\n\r\f\v])", x)
-#		tokens = tokens + val
-#	tokens = list(set(tokens))
-#	toid = {wrd:i for i, wrd in enumerate(tokens)}
-#	tostr = {i:wrd for i, wrd in enumerate(tokens)}
-#	prompt_ids = [] 
-#	for prompt in prompt_tokens:
-#		prompt_ids.append(test.encode(prompt, toid))
-#	prompt_ids = torch.tensor(prompt_ids, dtype=torch.long)
-#	response_ids = []
-#	for response in response_tokens:
-#		response_ids.append(test.encode(response, toid))
-#	response_ids = torch.tensor(response_ids, dtype=torch.long)
-#	print(prompt_ids[:10])
-#	print(response_ids[:10])
+	
 

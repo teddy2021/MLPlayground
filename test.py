@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.utils.checkpoint as checkpoint
-device = 'cpu'#'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 torch.autograd.set_detect_anomaly(True)
 import matplotlib.pyplot as plt
 
@@ -91,31 +91,29 @@ class FeedForward(nn.Module):
 		return self.net(x)
 
 class Model(nn.Module):
-	def __init__(self, context_size, batche_count, vocabulary_size, embed_dims, headcount, block_count=4):
+	def __init__(self, sentence_data, embed_dims, heads=4, blocks=4):
 		super().__init__()
-		self.context_size = context_size
-		self.batch_count = batche_count
+		self.context_size = sentence_data[0]
+		self.vocab_size = sentence_data[1]
 		self.dims = embed_dims
-		self.vocab_size = vocabulary_size
-		self.n_heads = headcount
-		self.n_blocks = block_count
 
-		self.token_embedding_table = nn.Embedding(vocabulary_size, embed_dims)
-		self.position_embedding_table = nn.Embedding(context_size, embed_dims)
+
+		self.token_embedding_table = nn.Embedding(self.vocab_size, embed_dims)
+		self.position_embedding_table = nn.Embedding(self.context_size, embed_dims)
 
 		self.blocks = nn.Sequential(*[
 			Block(
 				embed_dims, 
-				headcount, 
-				context_size) 
-			for _ in range(block_count)
+				heads, 
+				self.context_size) 
+			for _ in range(blocks)
 			]
 		)
-		self.layer_norm = nn.LayerNorm(embed_dims)
-		self.lm_head = nn.Linear(embed_dims, vocabulary_size)
+		self.layer_norm = nn.LayerNorm(self.dims)
+		self.lm_head = nn.Linear(self.dims, self.vocab_size)
 
-	def get_batch(self, data):
-		ran = torch.randint(len(data) - self.context_size, (self.batch_count,))
+	def get_batch(self, data, count=8):
+		ran = torch.randint(len(data) - self.context_size, (count,))
 		batch_in = torch.stack([data[i:i+self.context_size] for i in ran])
 		batch_out = torch.stack([data[i+1:i+self.context_size+1] for i in ran])
 		batch_in, batch_out = batch_in.to(device), batch_out.to(device)
@@ -123,7 +121,7 @@ class Model(nn.Module):
 
 	def forward(self, idx, targets=None):
 		ba, wi = idx.shape
-		token_embed = self.token_embedding_table(idx) # (Batch x width) -> (Batch x width x dms)
+		token_embed = self.token_embedding_table(idx)
 		pos_emb = self.position_embedding_table(torch.arange(wi, device=device))
 		tok_pos = token_embed + pos_emb
 		tok_pos = self.blocks(tok_pos)
@@ -132,22 +130,26 @@ class Model(nn.Module):
 		if None == targets:
 			loss = None
 		else:
-			# torch expects mD input for cross entropy to be formatted as (batches, channels, width)
-			# where channels is the vocabulary size
 			ba, wi, ch = logits.shape
 			logits = logits.view(ba * wi, ch)
 			targets = targets.view(ba*wi)
 			loss = F.cross_entropy(logits, targets)
 		return logits, loss
 
+	def get_distribution(self, idx):
+		indx = idx[:, -self.context_size:]
+		logits, _ = self(indx)
+		logits = logits[:, -1, :]
+		distrib = F.softmax(logits, dim=-1)
+		return distrib
+
 	def predict(self, idx, maximal_tokens):
-		for _ in range(maximal_tokens):
-			indx = idx[:, -self.batch_count:]
-			logits, _ = self(indx)
-			logits = logits[:, -1, :]
-			distrib = F.softmax(logits, dim=-1)
+		for i in range(maximal_tokens):
+			print(f"\r\tPredicting...\t{100*(i+1)/maximal_tokens:.2f}%.", end='')
+			distrib = self.get_distribution(idx)
 			idx_next = torch.multinomial(distrib, num_samples=1)
 			idx = torch.cat((idx, idx_next), dim=1)
+		print(f"\r\tPredicting...\tDone.")
 		return idx
 
 	@torch.no_grad()
@@ -163,43 +165,50 @@ class Model(nn.Module):
 		return out
 
 
+def proprocess_input(txt):
+	raw = txt.split()
+	words = len(set(raw))
+	print("Encoding data")
+	raw = text.split()
+	print(f'{len(raw)} total tokens')
+	words = list(set(raw))
+	toid = {wrd:i for i, wrd in enumerate(words)}
+	tostr = {i:wrd for i, wrd in enumerate(words)}
+	data = torch.tensor(encode(raw, toid), dtype=torch.long)
+	length = len(data)
+	print(f'{length} tokens in total')
+	training = data[:int(length * 0.9) ]
+	print(f'\t{len(training)} training data points')
+	validation = data[int(length * 0.9):]
+	print(f'\t{len(validation)} validation data points')
+	return (len(words), training, validation, toid, tostr)
+
+
 if __name__ == '__main__':
 	print('Beginning...')
 	print('Running on',device)
 	with open('input.txt', 'r', encoding='utf-8') as f:
 		text = f.read()
 	print(f'Read text [{len(text)}]')	
-	print("Encoding data")
-
-	raw = text.split()
-	print(f'{len(raw)} total tokens')
-	words = list(set(raw))
-	toid = {wrd:i for i, wrd in enumerate(words)}
-	tostr = {i:wrd for i, wrd in enumerate(words)}
 	
-	data = torch.tensor(encode(raw, toid), dtype=torch.long)
-	length = len(data)
-	print(f'{length} data points in total')
-	training = data[:int(length * 0.9) ]
-	print(f'\t{len(training)} training data points')
-	validation = data[int(length * 0.9):]
-	print(f'\t{len(validation)} validation data points')
-
+	vocab_size, training, validation, toid, tostr = proprocess_input(text)
 
 	batch_count = 64
-	size = 2048 if len(words) > 512 else len(words) // 4 #context
-	head_count = 8
-	dims = 32
-	iters = 1000
+	context_size = 200  #context
+	embedding_dims = 200
+	meta_size = (context_size, vocab_size)
 	learn = 3e-4
-	block_count = 8
+	block_count = 16
+	head_count = 16
+
+	iters = 10000
 	loss_interval = iters // 20
 	x = []
 	y = []
 	print('Setup variables and lambdas.')
 
 
-	m = Model(size, batch_count, len(words), dims, head_count, block_count)
+	m = Model(meta_size, embedding_dims, heads=head_count, blocks=block_count)
 	m = m.to(device)
 
 
@@ -209,26 +218,25 @@ if __name__ == '__main__':
 	print(f'Setup model and optimization {sum(p.numel() for p in m.parameters())/1e6} M parameters')
 	for steps in range(iters):
 		if(steps % loss_interval == 0):
-			print(f'\rTraining...\t{100*steps/iters}% \tEvaluating loss sample', end='')
+			print(f'\rTraining...\t{100*(steps+0.25)/iters:.4f}% \tEvaluating loss sample', end='')
 			x.append(steps//loss_interval)
 			y.append(m.estimate_loss(20, training))
-		print(f'\rTraining...\t{100*steps/iters}% \tGetting batch', end='')
-		batch_in, batch_out = m.get_batch(training)
-		print(f'\rTraining...\t{100*steps/iters}% \tForwarding through batch', end='')
+		print(f'\rTraining...\t{100*(steps+1/3)/iters:.4f}% \tGetting batch', ' ' * 32, end='')
+		batch_in, batch_out = m.get_batch(training, batch_count)
+		print(f'\rTraining...\t{100*(steps+2/3)/iters:.4f}% \tForwarding through batch', end='')
 		output, loss = m(batch_in, batch_out)
-		print(f'\rTraining...\t{100*steps/iters}% \tOptimizing',' ' * 32, end='')
+		print(f'\rTraining...\t{100*(steps+1)/iters:.4f}% \tOptimizing',' ' * 32, end='')
 		
 		optimizer.zero_grad(set_to_none=True)
 		loss.backward()
 		optimizer.step()
 		
 
-	print(f'Training...\t 100%',' ' *32)
+	print(f'\rTraining...\t 100%\tDone',' ' *32)
 	con = torch.zeros((1,1), dtype=torch.long, device=device)
 	pred = m.predict(con, maximal_tokens=500)[0].tolist()
-	print(f'\n\nWith a loss of {m.estimate_loss(300, validation)} we have {" ".join(decode(pred, tostr))}')
-	fig, ax = plt.subplots()
-	ax.plot(x, y)
-	fig.show()
-	m.save(model.state_dict(), 'model.ml')
+	print(f'\n\nWith a loss of {m.estimate_loss(300, validation)} we have: \n{" ".join(decode(pred, tostr))}')
+	plt.plot(x,y)
+	plt.show()
+	torch.save(m.state_dict(), 'model.ml')
 
