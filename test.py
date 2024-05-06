@@ -194,8 +194,8 @@ if __name__ == '__main__':
 	vocab_size, training, validation, toid, tostr = proprocess_input(text)
 
 	batch_count = 64
-	context_size = 200  #context
-	embedding_dims = 200
+	context_size = 150  #context
+	embedding_dims = 150
 	meta_size = (context_size, vocab_size)
 	learn = 3e-4
 	block_count = 16
