@@ -193,43 +193,71 @@ if __name__ == '__main__':
 	
 	vocab_size, training, validation, toid, tostr = proprocess_input(text)
 
-	batch_count = 64
-	context_size = 150  #context
-	embedding_dims = 150
+	batch_count = 16
+	context_size = 200  #context
+	embedding_dims = 200
 	meta_size = (context_size, vocab_size)
 	learn = 3e-4
 	block_count = 16
 	head_count = 16
 
-	iters = 10000
-	loss_interval = iters // 20
-	x = []
-	y = []
+	iters = 10000000
+	loss_interval = 30 if iters >= 100 else iters
 	print('Setup variables and lambdas.')
 
-
 	m = Model(meta_size, embedding_dims, heads=head_count, blocks=block_count)
+	if len(sys.argv) > 1:
+		print("Loading from checkpoint at ", end='')
+		try:
+			m.load_state_dict(torch.load("temp_model.ml"))
+			# load xs, ys, and iterator step
+			with open('checkpoint.txt', 'r', encoding='utf-8') as f:
+				steps = int(f.readline()) + 1
+				x = list(map(lambda x : int(x), f.readline().split(',')))
+			y = torch.load('checkpoint.tensor')
+		except:
+			steps = 0
+			x = []
+			y = []
+		print(f'{steps}')
+	else:
+		steps = 0
+		x = []
+		y = []
 	m = m.to(device)
+
 
 
 	optimizer = torch.optim.AdamW(m.parameters(), lr=learn)
 
 
 	print(f'Setup model and optimization {sum(p.numel() for p in m.parameters())/1e6} M parameters')
-	for steps in range(iters):
+	while steps <= iters:
 		if(steps % loss_interval == 0):
-			print(f'\rTraining...\t{100*(steps+0.25)/iters:.4f}% \tEvaluating loss sample', end='')
+			print(f'\rTraining...\t{100*(steps+0.25)/iters:.5f}% \tEvaluating', end='')
 			x.append(steps//loss_interval)
 			y.append(m.estimate_loss(20, training))
-		print(f'\rTraining...\t{100*(steps+1/3)/iters:.4f}% \tGetting batch', ' ' * 32, end='')
+			print(f'\rTraining...\t{100*(steps+0.25)/iters:.5f}% \tCheckpointing...', end='')
+			if steps > 1:
+				torch.save(m.state_dict(), "temp_model.ml")
+				with open('checkpoint.txt', 'w', encoding='utf-8') as f:
+					f.write(str(steps))
+					f.write('\n')
+					f.write(','.join(list(map(lambda v : str(v), x))))
+					f.write('\n')
+				torch.save(y, "checkpoint.tensor")
+
+
+		print(f'\rTraining...\t{100*(steps+1/3)/iters:.5f}% \tBatching', end='')
 		batch_in, batch_out = m.get_batch(training, batch_count)
-		print(f'\rTraining...\t{100*(steps+2/3)/iters:.4f}% \tForwarding through batch', end='')
+		print(f'\rTraining...\t{100*(steps+2/3)/iters:.5f}% \tForwarding', end='')
 		output, loss = m(batch_in, batch_out)
-		print(f'\rTraining...\t{100*(steps+1)/iters:.4f}% \tOptimizing',' ' * 32, end='')
+		print(f'\rTraining...\t{100*(steps+1)/iters:.5f}% \tOptimizing...', end='')
 		
 		optimizer.zero_grad(set_to_none=True)
 		loss.backward()
 		optimizer.step()
+		steps += 1
 		
 
 	print(f'\rTraining...\t 100%\tDone',' ' *32)
